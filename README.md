@@ -20,9 +20,10 @@ Built for the Decoding Data Science (DDS) AI Application Building Challenge — 
 - Telegram Bot API (alerts)
 
 ## Status
-🚧 Day 2 — Environment setup in progress
+🚧 Day 2 — Environment setup complete, core logic in progress
 
 ## How to run
 1. Open `notebooks/spendsense.ipynb` in Google Colab
-2. Add your Gemini API key when prompted
-3. Run all cells
+2. Run the setup cells (installs dependencies)
+3. Paste your Gemini API key when prompted
+4. Run all cells
