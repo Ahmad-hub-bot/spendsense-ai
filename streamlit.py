@@ -34,6 +34,7 @@ import pandas as pd
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
+from google import genai
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 
@@ -223,7 +224,7 @@ def run_spendsense_check():
 
     data = sheet.get_all_records()
     if not data:
-        return "No transactions found in the sheet yet.", pd.DataFrame(), ""
+        return "No transactions found in the sheet yet.", pd.DataFrame(), "", pd.DataFrame(), pd.DataFrame()
 
     processed = []
     for row in data:
@@ -247,6 +248,7 @@ def run_spendsense_check():
     week_end = week_start + pd.Timedelta(days=6)
 
     summary_rows = []
+    raw_rows = []
     alerts_fired = []
 
     for cat, budget in BUDGETS.items():
@@ -262,6 +264,15 @@ def run_spendsense_check():
                 "Status": status,
             }
         )
+        raw_rows.append(
+            {
+                "category": cat.capitalize(),
+                "spent": result["current_spend"],
+                "projected": result["projected_total"],
+                "budget": result["budget"],
+                "will_breach": result["will_breach"],
+            }
+        )
 
         if result["will_breach"]:
             alert_message = (
@@ -274,6 +285,7 @@ def run_spendsense_check():
             alerts_fired.append(cat)
 
     summary_df = pd.DataFrame(summary_rows)
+    raw_df = pd.DataFrame(raw_rows)
 
     if alerts_fired:
         status_message = f"🔔 Alerts sent for: {', '.join(alerts_fired)}. Check your Telegram!"
@@ -282,43 +294,324 @@ def run_spendsense_check():
 
     ai_summary = generate_summary(summary_df)
 
-    return status_message, summary_df, ai_summary
+    return status_message, summary_df, ai_summary, raw_df, live_df
 
 
 # ──────────────────────────────────────────────────────────────
-# 5. Streamlit UI
+# 5. Streamlit UI — fintech dashboard
 # ──────────────────────────────────────────────────────────────
-st.set_page_config(page_title="SpendSense", page_icon="💰", layout="centered")
+import plotly.graph_objects as go
 
-st.title("💰 SpendSense")
-st.caption(
-    "AI-powered spending monitor — auto-categorizes transactions and predicts "
-    "budget overruns before they happen."
-)
+st.set_page_config(page_title="SpendSense", page_icon="💸", layout="wide")
 
-if st.button("🔍 Check My Spending", type="primary"):
-    with st.spinner("Pulling live transactions and running the AI pipeline..."):
+DASH_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+:root {
+    --bg:        #0D1117;
+    --surface:   #161B26;
+    --surface2:  #1C2333;
+    --ink:       #F3F4F6;
+    --muted:     #9CA3AF;
+    --accent1:   #4F7CFF;
+    --accent2:   #A855F7;
+    --good:      #34D399;
+    --warn:      #F87171;
+    --hair:      #262C3D;
+}
+
+html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+.stApp { background-color: var(--bg); color: var(--ink); }
+header[data-testid="stHeader"] { background: transparent; }
+section[data-testid="stSidebar"] { background-color: var(--surface); border-right: 1px solid var(--hair); }
+.block-container { padding-top: 1.8rem; }
+
+/* sidebar brand */
+.ss-brand {
+    display: flex; align-items: center; gap: 10px; padding: 4px 4px 22px 4px;
+    border-bottom: 1px solid var(--hair); margin-bottom: 18px;
+}
+.ss-brand-icon {
+    width: 30px; height: 30px; border-radius: 8px;
+    background: linear-gradient(135deg, var(--accent1), var(--accent2));
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 14px; color: white;
+}
+.ss-brand-text { font-weight: 700; font-size: 1.05rem; color: var(--ink); }
+.ss-nav-label {
+    color: var(--muted); font-size: 0.7rem; letter-spacing: 0.08em;
+    text-transform: uppercase; margin: 4px 0 10px 4px;
+}
+
+/* stat cards */
+.ss-stat {
+    background: var(--surface); border: 1px solid var(--hair); border-radius: 14px;
+    padding: 18px 20px; height: 100%;
+}
+.ss-stat-label {
+    color: var(--muted); font-size: 0.8rem; margin-bottom: 8px;
+    display: flex; justify-content: space-between; align-items: center;
+}
+.ss-stat-value { font-size: 1.6rem; font-weight: 700; color: var(--ink); margin-bottom: 6px; }
+.ss-stat-sub { font-size: 0.76rem; }
+.ss-stat-sub.good { color: var(--good); }
+.ss-stat-sub.warn { color: var(--warn); }
+.ss-pill {
+    font-size: 0.68rem; padding: 2px 9px; border-radius: 20px; font-weight: 600;
+}
+.ss-pill.good { background: rgba(52,211,153,0.15); color: var(--good); }
+.ss-pill.warn { background: rgba(248,113,113,0.15); color: var(--warn); }
+
+/* hero balance card */
+.ss-hero {
+    background: linear-gradient(135deg, var(--accent1), var(--accent2));
+    border-radius: 16px; padding: 22px 24px; color: white; height: 100%;
+}
+.ss-hero-label { font-size: 0.82rem; opacity: 0.85; margin-bottom: 6px; }
+.ss-hero-value { font-size: 2rem; font-weight: 700; margin-bottom: 4px; }
+.ss-hero-sub { font-size: 0.78rem; opacity: 0.85; }
+
+/* panel wrapper for charts */
+.ss-panel {
+    background: var(--surface); border: 1px solid var(--hair);
+    border-radius: 14px; padding: 18px 20px 6px 20px; margin-bottom: 18px;
+}
+.ss-panel-title { font-size: 0.95rem; font-weight: 600; color: var(--ink); margin-bottom: 2px; }
+.ss-panel-sub { font-size: 0.76rem; color: var(--muted); margin-bottom: 6px; }
+
+/* transactions table */
+.ss-tx-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 11px 4px; border-bottom: 1px solid var(--hair); font-size: 0.85rem;
+}
+.ss-tx-row:last-child { border-bottom: none; }
+.ss-tx-merchant { font-weight: 600; color: var(--ink); }
+.ss-tx-cat { color: var(--muted); font-size: 0.76rem; }
+.ss-tx-amount { font-weight: 600; color: var(--ink); }
+
+/* ai summary callout */
+.ss-summary {
+    background: var(--surface2); border-left: 3px solid var(--accent1);
+    border-radius: 0 12px 12px 0; padding: 16px 20px; font-size: 0.9rem;
+    line-height: 1.6; color: var(--ink); margin-top: 4px;
+}
+.ss-summary-label {
+    font-size: 0.7rem; color: var(--muted); letter-spacing: 0.06em;
+    text-transform: uppercase; margin-bottom: 8px; display: block; font-weight: 600;
+}
+
+div.stButton > button {
+    background: linear-gradient(135deg, var(--accent1), var(--accent2));
+    color: white; border: none; font-weight: 600; border-radius: 10px;
+    padding: 0.55rem 1.3rem;
+}
+div.stButton > button:hover { opacity: 0.92; color: white; }
+
+.ss-footer { color: var(--muted); font-size: 0.75rem; margin-top: 28px; }
+</style>
+"""
+
+st.markdown(DASH_CSS, unsafe_allow_html=True)
+
+with st.sidebar:
+    st.markdown(
+        """
+        <div class="ss-brand">
+            <div class="ss-brand-icon">S</div>
+            <div class="ss-brand-text">SpendSense</div>
+        </div>
+        <div class="ss-nav-label">menu</div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.page_link if False else None  # placeholder, real nav not needed for single-page app
+    st.markdown("🏠 &nbsp; Dashboard", unsafe_allow_html=True)
+    st.markdown("📊 &nbsp; Reports", unsafe_allow_html=True)
+    st.markdown("⚙️ &nbsp; Settings", unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.caption("Built for the DDS AI Application Building Challenge")
+
+st.markdown("## Dashboard")
+st.caption("Live view of your spending, categorized and forecasted by AI.")
+
+run_clicked = st.button("🔍  Run the check")
+
+if run_clicked:
+    with st.spinner("Pulling transactions · classifying · forecasting..."):
         try:
-            status_message, summary_df, ai_summary = run_spendsense_check()
-
-            if "Error" in status_message or summary_df.empty:
-                st.warning(status_message)
-            else:
-                st.success(status_message)
-                st.dataframe(summary_df, use_container_width=True, hide_index=True)
-
-                if ai_summary:
-                    st.subheader("📝 AI Weekly Summary")
-                    st.write(ai_summary)
-
+            status_message, summary_df, ai_summary, raw_df, live_df = run_spendsense_check()
         except Exception as e:
-            st.error(f"Something went wrong: {e}")
-            st.info(
-                "Double-check your Streamlit secrets are filled in correctly "
-                "(Gemini key, Telegram token/chat ID, Google service account, sheet name)."
+            status_message, summary_df, ai_summary, raw_df, live_df = (
+                f"error: {e}", pd.DataFrame(), "", pd.DataFrame(), pd.DataFrame()
+            )
+
+    if summary_df.empty:
+        st.warning(status_message)
+        st.caption(
+            "Double-check Streamlit secrets are filled in (Gemini key, Telegram "
+            "token/chat ID, Google service account, sheet name)."
+        )
+    else:
+        total_spent = raw_df["spent"].sum()
+        total_budget = raw_df["budget"].sum()
+        pct_used = (total_spent / total_budget * 100) if total_budget else 0
+        over_count = int(raw_df["will_breach"].sum())
+
+        # ── top row: hero balance + stat cards ─────────────────
+        col_hero, col1, col2 = st.columns([1.3, 1, 1])
+
+        with col_hero:
+            st.markdown(
+                f"""
+                <div class="ss-hero">
+                    <div class="ss-hero-label">Total spent this week</div>
+                    <div class="ss-hero-value">₹{total_spent:,.0f}</div>
+                    <div class="ss-hero-sub">{pct_used:.0f}% of ₹{total_budget:,.0f} weekly budget</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with col1:
+            pill_class = "warn" if over_count > 0 else "good"
+            pill_text = f"{over_count} over pace" if over_count > 0 else "all on track"
+            st.markdown(
+                f"""
+                <div class="ss-stat">
+                    <div class="ss-stat-label">Categories <span class="ss-pill {pill_class}">{pill_text}</span></div>
+                    <div class="ss-stat-value">{len(raw_df)}</div>
+                    <div class="ss-stat-sub">tracked this week</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with col2:
+            tx_count = len(live_df) if not live_df.empty else 0
+            st.markdown(
+                f"""
+                <div class="ss-stat">
+                    <div class="ss-stat-label">Transactions</div>
+                    <div class="ss-stat-value">{tx_count}</div>
+                    <div class="ss-stat-sub">captured from live feed</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # ── charts row: bar (spent vs budget) + donut (category split) ──
+        col_bar, col_donut = st.columns([1.4, 1])
+
+        with col_bar:
+            st.markdown(
+                """
+                <div class="ss-panel">
+                    <div class="ss-panel-title">Spent vs budget</div>
+                    <div class="ss-panel-sub">By category, this week</div>
+                """,
+                unsafe_allow_html=True,
+            )
+            bar_colors = ["#F87171" if b else "#34D399" for b in raw_df["will_breach"]]
+            fig_bar = go.Figure()
+            fig_bar.add_bar(
+                x=raw_df["category"], y=raw_df["budget"],
+                name="Budget", marker_color="#262C3D", width=0.45,
+            )
+            fig_bar.add_bar(
+                x=raw_df["category"], y=raw_df["spent"],
+                name="Spent", marker_color=bar_colors, width=0.45,
+            )
+            fig_bar.update_layout(
+                barmode="overlay", height=280, margin=dict(l=10, r=10, t=10, b=10),
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#9CA3AF", size=12),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+                yaxis=dict(gridcolor="#262C3D"),
+                xaxis=dict(gridcolor="rgba(0,0,0,0)"),
+            )
+            st.plotly_chart(fig_bar, use_container_width=True, config={"displayModeBar": False})
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        with col_donut:
+            st.markdown(
+                """
+                <div class="ss-panel">
+                    <div class="ss-panel-title">Where it went</div>
+                    <div class="ss-panel-sub">Share of total spend</div>
+                """,
+                unsafe_allow_html=True,
+            )
+            donut_colors = ["#4F7CFF", "#A855F7", "#F472B6", "#34D399"]
+            fig_donut = go.Figure(
+                data=[
+                    go.Pie(
+                        labels=raw_df["category"], values=raw_df["spent"],
+                        hole=0.62, marker=dict(colors=donut_colors),
+                        textinfo="label+percent", textfont=dict(color="#F3F4F6", size=11),
+                    )
+                ]
+            )
+            fig_donut.update_layout(
+                height=280, margin=dict(l=10, r=10, t=10, b=10),
+                paper_bgcolor="rgba(0,0,0,0)", showlegend=False,
+                annotations=[
+                    dict(
+                        text=f"₹{total_spent:,.0f}", x=0.5, y=0.5,
+                        font=dict(size=16, color="#F3F4F6"), showarrow=False,
+                    )
+                ],
+            )
+            st.plotly_chart(fig_donut, use_container_width=True, config={"displayModeBar": False})
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # ── recent transactions ──────────────────────────────────
+        if not live_df.empty:
+            st.markdown(
+                """
+                <div class="ss-panel">
+                    <div class="ss-panel-title">Recent transactions</div>
+                    <div class="ss-panel-sub">From your live feed</div>
+                """,
+                unsafe_allow_html=True,
+            )
+            rows_html = ""
+            for _, row in live_df.sort_values("date", ascending=False).head(8).iterrows():
+                rows_html += f"""
+                <div class="ss-tx-row">
+                    <div>
+                        <div class="ss-tx-merchant">{row['merchant']}</div>
+                        <div class="ss-tx-cat">{row['category'].capitalize()}</div>
+                    </div>
+                    <div class="ss-tx-amount">₹{row['amount']:,.0f}</div>
+                </div>
+                """
+            st.markdown(rows_html, unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # ── status + AI summary ─────────────────────────────────
+        status_color = "var(--warn)" if "🔔" in status_message else "var(--good)"
+        st.markdown(
+            f'<div style="color:{status_color};font-size:0.85rem;font-weight:600;margin-bottom:10px;">{status_message}</div>',
+            unsafe_allow_html=True,
+        )
+
+        if ai_summary:
+            st.markdown(
+                f"""
+                <div class="ss-summary">
+                    <span class="ss-summary-label">AI weekly read</span>
+                    {ai_summary}
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
 else:
-    st.info("Click the button above to pull your latest spending and check it against your budgets.")
+    st.info("Click **Run the check** to pull your latest transactions and see your dashboard.")
 
-st.divider()
-st.caption("Built for the Decoding Data Science (DDS) AI Application Building Challenge.")
+st.markdown(
+    '<div class="ss-footer">SpendSense · DDS AI Application Building Challenge</div>',
+    unsafe_allow_html=True,
+)
