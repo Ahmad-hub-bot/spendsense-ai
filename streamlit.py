@@ -147,9 +147,13 @@ def parse_transaction(sms_text: str) -> dict:
     )
     amount = float(amount_match.group(1).replace(",", "")) if amount_match else None
 
-    merchant_match = re.findall(r"\b[A-Z]{3,}(?:\s[A-Z]{2,})*\b", sms_text)
-    ignore_words = {"INR", "RS", "UPI", "CARD"}
-    merchants = [m for m in merchant_match if m not in ignore_words]
+    # Matches ALL CAPS (SWIGGY) AND Title Case (Subway, Coffee Day) merchant names
+    merchant_match = re.findall(r"\b[A-Z][a-zA-Z]{2,}(?:\s[A-Z][a-zA-Z]{2,})*\b", sms_text)
+    ignore_words = {
+        "INR", "RS", "UPI", "CARD", "YOUR", "ACCOUNT", "FROM", "FOR",
+        "YOU", "USING", "SPENT", "DEBITED", "PAID", "ENDING",
+    }
+    merchants = [m for m in merchant_match if m.upper() not in ignore_words]
     merchant = merchants[0] if merchants else "UNKNOWN"
 
     return {"amount": amount, "merchant": merchant, "raw_text": sms_text}
