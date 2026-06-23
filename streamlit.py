@@ -210,21 +210,32 @@ def send_telegram_alert(message: str) -> dict:
 
 
 def generate_summary(summary_df: pd.DataFrame) -> str:
-    """Uses Gemini Flash-Lite to generate a short natural-language spending summary."""
-    try:
-        client = load_genai_client()
-        prompt = (
-            "You are a friendly financial assistant. Based on this weekly spending "
-            "data, write a 2-3 sentence summary highlighting any categories at risk "
-            "and one practical tip. Be encouraging, not alarming.\n\n"
-            f"{summary_df.to_string(index=False)}"
-        )
-        response = client.models.generate_content(
-            model="gemini-2.5-flash-lite", contents=prompt
-        )
-        return response.text
-    except Exception as e:
-        return f"(Summary unavailable: {e})"
+    """Uses Gemini Flash-Lite to generate a short natural-language spending summary.
+    Retries on transient server-side errors (e.g. 503 high-demand) before giving up."""
+    import time
+
+    client = load_genai_client()
+    prompt = (
+        "You are a friendly financial assistant. Based on this weekly spending "
+        "data, write a 2-3 sentence summary highlighting any categories at risk "
+        "and one practical tip. Be encouraging, not alarming.\n\n"
+        f"{summary_df.to_string(index=False)}"
+    )
+
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.5-flash-lite", contents=prompt
+            )
+            return response.text
+        except Exception as e:
+            is_last_attempt = attempt == max_retries - 1
+            if is_last_attempt:
+                return f"(Summary unavailable after {max_retries} attempts: {e})"
+            time.sleep(2 ** attempt)  # 1s, then 2s backoff before retrying
+
+    return "(Summary unavailable: unexpected retry loop exit)"
 
 
 # ──────────────────────────────────────────────────────────────
