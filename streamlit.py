@@ -147,14 +147,22 @@ def parse_transaction(sms_text: str) -> dict:
     )
     amount = float(amount_match.group(1).replace(",", "")) if amount_match else None
 
-    # Matches ALL CAPS (SWIGGY) AND Title Case (Subway, Coffee Day) merchant names
-    merchant_match = re.findall(r"\b[A-Z][a-zA-Z]{2,}(?:\s[A-Z][a-zA-Z]{2,})*\b", sms_text)
+    # Try capitalized merchant names first (SWIGGY, Subway, Coffee Day, H&M)
+    merchant_match = re.findall(r"\b[A-Z][a-zA-Z&]{2,}(?:\s[A-Z][a-zA-Z&]{2,})*\b", sms_text)
     ignore_words = {
         "INR", "RS", "UPI", "CARD", "YOUR", "ACCOUNT", "FROM", "FOR",
-        "YOU", "USING", "SPENT", "DEBITED", "PAID", "ENDING",
+        "YOU", "USING", "SPENT", "DEBITED", "PAID", "ENDING", "TO",
     }
     merchants = [m for m in merchant_match if m.upper() not in ignore_words]
-    merchant = merchants[0] if merchants else "UNKNOWN"
+
+    if merchants:
+        merchant = merchants[0]
+    else:
+        # Fallback for lowercase generic phrases (e.g. "general store", "laundry service")
+        fallback_match = re.search(
+            r"(?:for|at|to)\s+([a-zA-Z\s]+?)(?:\s+via|\s+delivery|$)", sms_text, re.IGNORECASE
+        )
+        merchant = fallback_match.group(1).strip().title() if fallback_match else "UNKNOWN"
 
     return {"amount": amount, "merchant": merchant, "raw_text": sms_text}
 
