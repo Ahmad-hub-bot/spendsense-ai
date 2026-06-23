@@ -231,17 +231,30 @@ def run_spendsense_check():
         return "No transactions found in the sheet yet.", pd.DataFrame(), "", pd.DataFrame(), pd.DataFrame()
 
     processed = []
+    skipped_rows = 0
     for row in data:
-        sms_text = row["sms_text"]
+        sms_text = str(row.get("sms_text", "")).strip()
+        timestamp = str(row.get("timestamp", "")).strip()
+
+        if not sms_text or not timestamp:
+            skipped_rows += 1
+            continue  # skip incomplete rows instead of crashing the whole app
+
         parsed = parse_transaction(sms_text)
         category = classify_transaction(sms_text, vectorizer, clf)
         processed.append(
             {
-                "date": row["timestamp"],
+                "date": timestamp,
                 "merchant": parsed["merchant"],
                 "amount": parsed["amount"],
                 "category": category,
             }
+        )
+
+    if not processed:
+        return (
+            f"No valid transactions found ({skipped_rows} row(s) skipped due to missing data).",
+            pd.DataFrame(), "", pd.DataFrame(), pd.DataFrame(),
         )
 
     live_df = pd.DataFrame(processed)
