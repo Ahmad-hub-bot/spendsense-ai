@@ -93,7 +93,7 @@ LABELS = (
 )
 
 BUDGETS = {
-    "food": 1500,
+    "food": 150000,
     "shopping": 3000,
     "travel": 1000,
     "daily": 800,
