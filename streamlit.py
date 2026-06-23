@@ -230,6 +230,10 @@ def run_spendsense_check():
     if not data:
         return "No transactions found in the sheet yet.", pd.DataFrame(), "", pd.DataFrame(), pd.DataFrame()
 
+    # Normalize column names — strips stray whitespace from Sheet headers
+    # (e.g. "sms_text " with a trailing space) so lookups don't silently fail
+    data = [{k.strip(): v for k, v in row.items()} for row in data]
+
     processed = []
     skipped_rows = 0
     for row in data:
