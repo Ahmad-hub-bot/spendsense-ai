@@ -598,8 +598,18 @@ if run_clicked:
                 """,
                 unsafe_allow_html=True,
             )
+
+            tx_filter = st.selectbox(
+                "Filter by category",
+                options=["All"] + sorted(live_df["category"].str.capitalize().unique().tolist()),
+                key="tx_filter",
+                label_visibility="collapsed",
+            )
+
+            filtered_df = live_df if tx_filter == "All" else live_df[live_df["category"].str.capitalize() == tx_filter]
+
             rows_html = ""
-            for _, row in live_df.sort_values("date", ascending=False).head(8).iterrows():
+            for _, row in filtered_df.sort_values("date", ascending=False).head(15).iterrows():
                 rows_html += f"""
                 <div class="ss-tx-row">
                     <div>
@@ -609,7 +619,11 @@ if run_clicked:
                     <div class="ss-tx-amount">₹{row['amount']:,.0f}</div>
                 </div>
                 """
-            st.markdown(rows_html, unsafe_allow_html=True)
+            st.markdown(rows_html if rows_html else "<p style='color:var(--muted);font-size:0.85rem;'>No transactions in this category.</p>", unsafe_allow_html=True)
+            st.markdown(
+                f'<p style="color:var(--muted);font-size:0.75rem;margin-top:8px;">Showing {min(len(filtered_df), 15)} of {len(filtered_df)} transactions</p>',
+                unsafe_allow_html=True,
+            )
             st.markdown("</div>", unsafe_allow_html=True)
 
         # ── status + AI summary ─────────────────────────────────
