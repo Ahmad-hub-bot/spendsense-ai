@@ -72,7 +72,7 @@ SAMPLE_TRANSACTIONS = [
 LABELS = (["food"] * 10 + ["shopping"] * 10 + ["travel"] * 10 + ["daily"] * 10)
 
 BUDGETS = {
-    "food": 150000,
+    "food": 15000,
     "shopping": 3000,
     "travel": 1000,
     "daily": 800,
