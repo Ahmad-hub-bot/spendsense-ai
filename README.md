@@ -20,7 +20,7 @@ Built for the Decoding Data Science (DDS) AI Application Building Challenge — 
 - Telegram Bot API (alerts)
 
 ## Status
-🚧 Day 2 — Environment setup complete, core logic in progress
+Environment setup complete, core logic in progress
 
 ## How to run
 1. Open `notebooks/spendsense.ipynb` in Google Colab
