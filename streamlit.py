@@ -29,6 +29,9 @@ Deploy on Streamlit Community Cloud:
 """
 
 import re
+import json
+import time
+import datetime
 import requests
 import pandas as pd
 import streamlit as st
@@ -97,6 +100,7 @@ BUDGETS = {
     "shopping": 3000,
     "travel": 1000,
     "daily": 800,
+    "uncategorized": 500,  # placeholder budget; mainly for visibility, not enforcement
 }
 
 
@@ -120,7 +124,9 @@ def load_classifier():
 
 
 @st.cache_resource
-def load_sheet_client():
+def load_spreadsheet():
+    """Opens the spreadsheet itself (not just sheet1) so both the live
+    feed tab and the History tab can be reached from one client."""
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
@@ -129,7 +135,27 @@ def load_sheet_client():
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     client = gspread.authorize(creds)
     sheet_name = st.secrets.get("GSHEET_NAME", "SpendSense Live Feed")
-    return client.open(sheet_name).sheet1
+    return client.open(sheet_name)
+
+
+def load_sheet_client():
+    """Live transaction feed tab (sheet1) — same role as before."""
+    return load_spreadsheet().sheet1
+
+
+def load_history_sheet():
+    """Opens (or creates) a 'History' worksheet tab, to store one row
+    per check run so past digests aren't lost between sessions."""
+    spreadsheet = load_spreadsheet()
+    try:
+        return spreadsheet.worksheet("History")
+    except gspread.WorksheetNotFound:
+        history_ws = spreadsheet.add_worksheet(title="History", rows=1000, cols=8)
+        history_ws.append_row(
+            ["timestamp", "total_spent", "total_budget", "categories_over",
+             "tone", "headline", "tip"]
+        )
+        return history_ws
 
 
 @st.cache_resource
@@ -167,9 +193,18 @@ def parse_transaction(sms_text: str) -> dict:
     return {"amount": amount, "merchant": merchant, "raw_text": sms_text}
 
 
-def classify_transaction(sms_text: str, vectorizer, clf) -> str:
+def classify_transaction(sms_text: str, vectorizer, clf, threshold: float = 0.4) -> str:
+    """Classifies with a confidence floor — anything below threshold is
+    labeled 'uncategorized' rather than silently guessing wrong.
+    Keep this in sync with the matching function in daily_summary.py."""
     X_new = vectorizer.transform([sms_text])
-    return clf.predict(X_new)[0]
+    probs = clf.predict_proba(X_new)[0]
+    best_idx = probs.argmax()
+    confidence = probs[best_idx]
+
+    if confidence < threshold:
+        return "uncategorized"
+    return clf.classes_[best_idx]
 
 
 def forecast_breach(df, category, weekly_budget, week_start, week_end, today=None):
@@ -209,18 +244,30 @@ def send_telegram_alert(message: str) -> dict:
     return response.json()
 
 
-def generate_summary(summary_df: pd.DataFrame) -> str:
-    """Uses Gemini Flash-Lite to generate a short natural-language spending summary.
+def generate_summary(summary_df: pd.DataFrame) -> dict:
+    """Uses Gemini Flash-Lite to generate a structured spending summary.
+    Returns a dict: {"tone": "good"|"warning", "headline": str, "tip": str}
+    instead of a free-text blob, so the UI can render it consistently and
+    color-code it by risk level.
     Retries on transient server-side errors (e.g. 503 high-demand) before giving up."""
-    import time
-
     client = load_genai_client()
     prompt = (
         "You are a friendly financial assistant. Based on this weekly spending "
-        "data, write a 2-3 sentence summary highlighting any categories at risk "
-        "and one practical tip. Be encouraging, not alarming.\n\n"
+        "data, respond with ONLY a JSON object (no markdown, no code fences) "
+        "in exactly this shape:\n"
+        '{"tone": "good" or "warning", "headline": "one short sentence on the '
+        'overall state", "tip": "one practical, encouraging tip tied to the '
+        'riskiest category"}\n\n'
+        "Set tone to \"warning\" only if at least one category is projected "
+        "to breach its budget. Be warm and encouraging, never alarming.\n\n"
         f"{summary_df.to_string(index=False)}"
     )
+
+    fallback = {
+        "tone": "warning",
+        "headline": "Summary unavailable",
+        "tip": "",
+    }
 
     max_retries = 3
     for attempt in range(max_retries):
@@ -228,14 +275,66 @@ def generate_summary(summary_df: pd.DataFrame) -> str:
             response = client.models.generate_content(
                 model="gemini-2.5-flash-lite", contents=prompt
             )
-            return response.text
+            raw = response.text.strip()
+            # Strip accidental markdown code fences, just in case
+            if raw.startswith("```"):
+                raw = raw.strip("`")
+                raw = raw.replace("json\n", "", 1) if raw.startswith("json\n") else raw
+
+            parsed = json.loads(raw)
+
+            # Validate shape before trusting it — never let a malformed
+            # response crash the UI layer downstream
+            if not all(k in parsed for k in ("tone", "headline", "tip")):
+                raise ValueError("Missing expected keys in Gemini JSON response")
+            if parsed["tone"] not in ("good", "warning"):
+                parsed["tone"] = "warning"
+
+            return parsed
+
         except Exception as e:
             is_last_attempt = attempt == max_retries - 1
             if is_last_attempt:
-                return f"(Summary unavailable after {max_retries} attempts: {e})"
+                fallback["headline"] = f"Summary unavailable after {max_retries} attempts"
+                fallback["tip"] = str(e)
+                return fallback
             time.sleep(2 ** attempt)  # 1s, then 2s backoff before retrying
 
-    return "(Summary unavailable: unexpected retry loop exit)"
+    return fallback
+
+
+def log_run_to_history(raw_df: pd.DataFrame, ai_summary: dict) -> None:
+    """Best-effort logging — a logging failure should never break the dashboard."""
+    try:
+        history_ws = load_history_sheet()
+        total_spent = float(raw_df["spent"].sum())
+        total_budget = float(raw_df["budget"].sum())
+        categories_over = int(raw_df["will_breach"].sum())
+
+        history_ws.append_row([
+            datetime.datetime.now().isoformat(timespec="seconds"),
+            round(total_spent, 2),
+            round(total_budget, 2),
+            categories_over,
+            ai_summary.get("tone", ""),
+            ai_summary.get("headline", ""),
+            ai_summary.get("tip", ""),
+        ])
+    except Exception:
+        pass  # logging is non-critical; never break the main flow over it
+
+
+def load_run_history(limit: int = 10) -> pd.DataFrame:
+    """Fetches the most recent N logged runs, newest first."""
+    try:
+        history_ws = load_history_sheet()
+        records = history_ws.get_all_records()
+        if not records:
+            return pd.DataFrame()
+        df = pd.DataFrame(records)
+        return df.tail(limit).iloc[::-1].reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame()
 
 
 # ──────────────────────────────────────────────────────────────
@@ -247,7 +346,7 @@ def run_spendsense_check():
 
     data = sheet.get_all_records()
     if not data:
-        return "No transactions found in the sheet yet.", pd.DataFrame(), "", pd.DataFrame(), pd.DataFrame()
+        return "No transactions found in the sheet yet.", pd.DataFrame(), {}, pd.DataFrame(), pd.DataFrame()
 
     # Normalize column names — strips stray whitespace from Sheet headers
     # (e.g. "sms_text " with a trailing space) so lookups don't silently fail
@@ -277,7 +376,7 @@ def run_spendsense_check():
     if not processed:
         return (
             f"No valid transactions found ({skipped_rows} row(s) skipped due to missing data).",
-            pd.DataFrame(), "", pd.DataFrame(), pd.DataFrame(),
+            pd.DataFrame(), {}, pd.DataFrame(), pd.DataFrame(),
         )
 
     live_df = pd.DataFrame(processed)
@@ -332,9 +431,10 @@ def run_spendsense_check():
     else:
         status_message = "✅ All categories on track. No alerts needed."
 
-    ai_summary = generate_summary(summary_df)
+    ai_summary_data = generate_summary(summary_df)
+    log_run_to_history(raw_df, ai_summary_data)
 
-    return status_message, summary_df, ai_summary, raw_df, live_df
+    return status_message, summary_df, ai_summary_data, raw_df, live_df
 
 
 # ──────────────────────────────────────────────────────────────
@@ -441,6 +541,13 @@ section[data-testid="stSidebar"] { background-color: var(--surface); border-righ
     text-transform: uppercase; margin-bottom: 8px; display: block; font-weight: 600;
 }
 
+/* past digests (sidebar history) */
+.ss-hist-row {
+    font-size: 0.78rem; padding: 6px 0; border-bottom: 1px solid var(--hair);
+}
+.ss-hist-row:last-child { border-bottom: none; }
+.ss-hist-time { color: var(--muted); }
+
 div.stButton > button {
     background: linear-gradient(135deg, var(--accent1), var(--accent2));
     color: white; border: none; font-weight: 600; border-radius: 10px;
@@ -465,10 +572,30 @@ with st.sidebar:
         """,
         unsafe_allow_html=True,
     )
-    st.page_link if False else None  # placeholder, real nav not needed for single-page app
     st.markdown("🏠 &nbsp; Dashboard", unsafe_allow_html=True)
     st.markdown("📊 &nbsp; Reports", unsafe_allow_html=True)
     st.markdown("⚙️ &nbsp; Settings", unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("**📜 Past digests**")
+    history_df = load_run_history(limit=10)
+    if history_df.empty:
+        st.caption("No history yet — run a check to start your log.")
+    else:
+        for _, row in history_df.iterrows():
+            icon = "✅" if row.get("tone") == "good" else "⚠️"
+            spent_val = row.get("total_spent", 0)
+            try:
+                spent_val = f"{float(spent_val):,.0f}"
+            except (TypeError, ValueError):
+                spent_val = str(spent_val)
+            st.markdown(
+                f"<div class='ss-hist-row'>{icon} <b>₹{spent_val}</b> — "
+                f"{row.get('headline', '')}<br>"
+                f"<span class='ss-hist-time'>{str(row.get('timestamp', ''))[:16]}</span></div>",
+                unsafe_allow_html=True,
+            )
+
     st.markdown("<br>", unsafe_allow_html=True)
     st.caption("Built for the DDS AI Application Building Challenge")
 
@@ -480,10 +607,10 @@ run_clicked = st.button("🔍  Run the check")
 if run_clicked:
     with st.spinner("Pulling transactions · classifying · forecasting..."):
         try:
-            status_message, summary_df, ai_summary, raw_df, live_df = run_spendsense_check()
+            status_message, summary_df, ai_summary_data, raw_df, live_df = run_spendsense_check()
         except Exception as e:
-            status_message, summary_df, ai_summary, raw_df, live_df = (
-                f"error: {e}", pd.DataFrame(), "", pd.DataFrame(), pd.DataFrame()
+            status_message, summary_df, ai_summary_data, raw_df, live_df = (
+                f"error: {e}", pd.DataFrame(), {}, pd.DataFrame(), pd.DataFrame()
             )
 
     if summary_df.empty:
@@ -652,12 +779,17 @@ if run_clicked:
             unsafe_allow_html=True,
         )
 
-        if ai_summary:
+        if ai_summary_data and ai_summary_data.get("headline"):
+            tone = ai_summary_data.get("tone", "warning")
+            border_color = "var(--good)" if tone == "good" else "var(--warn)"
+            tone_icon = "✅" if tone == "good" else "⚠️"
+
             st.markdown(
                 f"""
-                <div class="ss-summary">
+                <div class="ss-summary" style="border-left-color: {border_color};">
                     <span class="ss-summary-label">AI weekly read</span>
-                    {ai_summary}
+                    <div style="font-weight:600; margin-bottom:6px;">{tone_icon} {ai_summary_data['headline']}</div>
+                    <div style="color:var(--muted); font-size:0.85rem;">{ai_summary_data.get('tip', '')}</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
