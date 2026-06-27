@@ -159,7 +159,7 @@ def parse_transaction(sms_text: str) -> dict:
 def classify_transaction(sms_text: str, vectorizer, clf) -> str:
     """Always classifies into one of the 4 trained categories: food, shopping, travel, daily."""
     X_new = vectorizer.transform([sms_text])
-    return clf.classes_[clf.predict(X_new)[0]]
+    return clf.predict(X_new)[0]
 
 
 def forecast_breach(df, category, weekly_budget, week_start, week_end, today=None):
