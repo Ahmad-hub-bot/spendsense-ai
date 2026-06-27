@@ -1,31 +1,6 @@
 """
 SpendSense — AI-powered spending monitor with predictive budget alerts.
 Built for the Decoding Data Science (DDS) AI Application Building Challenge.
-
-Deploy on Streamlit Community Cloud:
-1. Push this file to your GitHub repo as app.py
-2. Go to share.streamlit.io -> New app -> select this repo/branch/app.py
-3. Add secrets in the Streamlit dashboard (Settings -> Secrets) using the format below:
-
-    GEMINI_API_KEY = "your-gemini-key"
-    TELEGRAM_BOT_TOKEN = "your-telegram-bot-token"
-    TELEGRAM_CHAT_ID = "your-chat-id"
-    GSHEET_NAME = "SpendSense Live Feed"
-
-    [gcp_service_account]
-    type = "service_account"
-    project_id = "..."
-    private_key_id = "..."
-    private_key = "..."
-    client_email = "..."
-    client_id = "..."
-    auth_uri = "https://accounts.google.com/o/oauth2/auth"
-    token_uri = "https://oauth2.googleapis.com/token"
-    auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
-    client_x509_cert_url = "..."
-
-   (Copy these values directly from your service account JSON file —
-    paste the private_key exactly as-is, including the \\n line breaks.)
 """
 
 import re
@@ -42,7 +17,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 
 # ──────────────────────────────────────────────────────────────
-# 1. Training data for the classifier
+# 1. Training data
 # ──────────────────────────────────────────────────────────────
 SAMPLE_TRANSACTIONS = [
     # FOOD (10)
@@ -91,22 +66,18 @@ SAMPLE_TRANSACTIONS = [
     "Rs 100 paid at GENERAL STORE",
 ]
 
-LABELS = (
-    ["food"] * 10 + ["shopping"] * 10 + ["travel"] * 10 + ["daily"] * 10
-)
+LABELS = ["food"] * 10 + ["shopping"] * 10 + ["travel"] * 10 + ["daily"] * 10
 
 BUDGETS = {
     "food": 15000,
     "shopping": 3000,
     "travel": 1000,
     "daily": 800,
-    "miscellaneous": 500,  # catch-all for low-confidence classifications
 }
 
 
 # ──────────────────────────────────────────────────────────────
-# 2. Cached resources — classifier, sheet client, gemini client
-#    (cached so they aren't rebuilt on every button click)
+# 2. Cached resources
 # ──────────────────────────────────────────────────────────────
 @st.cache_resource
 def load_classifier():
@@ -123,10 +94,8 @@ def load_classifier():
     return vectorizer, clf
 
 
-@st.cache_resource
+@st.cache_resource(ttl=3000)  # refresh before Google's 1hr token expiry
 def load_spreadsheet():
-    """Opens the spreadsheet itself (not just sheet1) so both the live
-    feed tab and the History tab can be reached from one client."""
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
@@ -139,13 +108,10 @@ def load_spreadsheet():
 
 
 def load_sheet_client():
-    """Live transaction feed tab (sheet1) — same role as before."""
     return load_spreadsheet().sheet1
 
 
 def load_history_sheet():
-    """Opens (or creates) a 'History' worksheet tab, to store one row
-    per check run so past digests aren't lost between sessions."""
     spreadsheet = load_spreadsheet()
     try:
         return spreadsheet.worksheet("History")
@@ -167,24 +133,21 @@ def load_genai_client():
 # 3. Core pipeline functions
 # ──────────────────────────────────────────────────────────────
 def parse_transaction(sms_text: str) -> dict:
-    """Extracts amount and a rough merchant guess from raw SMS-style text."""
-    amount_match = re.search(
-        r"(?:INR|Rs\.?)\s?([\d,]+\.?\d*)", sms_text, re.IGNORECASE
-    )
+    amount_match = re.search(r"(?:INR|Rs\.?)\s?([\d,]+\.?\d*)", sms_text, re.IGNORECASE)
     amount = float(amount_match.group(1).replace(",", "")) if amount_match else None
 
-    # Try capitalized merchant names first (SWIGGY, Subway, Coffee Day, H&M)
     merchant_match = re.findall(r"\b[A-Z][a-zA-Z&]{2,}(?:\s[A-Z][a-zA-Z&]{2,})*\b", sms_text)
     ignore_words = {
         "INR", "RS", "UPI", "CARD", "YOUR", "ACCOUNT", "FROM", "FOR",
         "YOU", "USING", "SPENT", "DEBITED", "PAID", "ENDING", "TO",
+        "HDFC", "ICICI", "SBI", "AXIS", "KOTAK", "YES", "BANK",
+        "ALERT", "DEAR", "CUSTOMER", "TRANSACTION",
     }
     merchants = [m for m in merchant_match if m.upper() not in ignore_words]
 
     if merchants:
         merchant = merchants[0]
     else:
-        # Fallback for lowercase generic phrases (e.g. "general store", "laundry service")
         fallback_match = re.search(
             r"(?:for|at|to)\s+([a-zA-Z\s]+?)(?:\s+via|\s+delivery|$)", sms_text, re.IGNORECASE
         )
@@ -193,26 +156,13 @@ def parse_transaction(sms_text: str) -> dict:
     return {"amount": amount, "merchant": merchant, "raw_text": sms_text}
 
 
-def classify_transaction(sms_text: str, vectorizer, clf, threshold: float = 0.4) -> str:
-    """Classifies with a confidence floor — anything below threshold is
-    labeled 'miscellaneous' rather than silently guessing wrong.
-    NOTE: with a small training set, even in-sample transactions can score
-    under 40% confidence (verified during testing), so this may catch more
-    transactions than intended. Consider lowering `threshold` (e.g. 0.25)
-    or expanding SAMPLE_TRANSACTIONS if 'miscellaneous' fills up too fast.
-    Keep this in sync with the matching function in daily_summary.py."""
+def classify_transaction(sms_text: str, vectorizer, clf) -> str:
+    """Always classifies into one of the 4 trained categories: food, shopping, travel, daily."""
     X_new = vectorizer.transform([sms_text])
-    probs = clf.predict_proba(X_new)[0]
-    best_idx = probs.argmax()
-    confidence = probs[best_idx]
-
-    if confidence < threshold:
-        return "miscellaneous"
-    return clf.classes_[best_idx]
+    return clf.classes_[clf.predict(X_new)[0]]
 
 
 def forecast_breach(df, category, weekly_budget, week_start, week_end, today=None):
-    """Checks current spend pace and forecasts if it'll exceed budget by week end."""
     if today is None:
         today = df["date"].max()
 
@@ -221,11 +171,9 @@ def forecast_breach(df, category, weekly_budget, week_start, week_end, today=Non
         & (df["date"] >= week_start)
         & (df["date"] <= week_end)
     ]
-
     current_spend = week_data["amount"].sum()
     days_elapsed = max((today.date() - week_start.date()).days + 1, 1)
     total_days = (week_end - week_start).days + 1
-
     daily_rate = current_spend / days_elapsed
     projected_total = daily_rate * total_days
     will_breach = projected_total > weekly_budget
@@ -249,11 +197,6 @@ def send_telegram_alert(message: str) -> dict:
 
 
 def generate_summary(summary_df: pd.DataFrame) -> dict:
-    """Uses Gemini Flash-Lite to generate a structured spending summary.
-    Returns a dict: {"tone": "good"|"warning", "headline": str, "tip": str}
-    instead of a free-text blob, so the UI can render it consistently and
-    color-code it by risk level.
-    Retries on transient server-side errors (e.g. 503 high-demand) before giving up."""
     client = load_genai_client()
     prompt = (
         "You are a friendly financial assistant. Based on this weekly spending "
@@ -263,15 +206,11 @@ def generate_summary(summary_df: pd.DataFrame) -> dict:
         'overall state", "tip": "one practical, encouraging tip tied to the '
         'riskiest category"}\n\n'
         "Set tone to \"warning\" only if at least one category is projected "
-        "to breach its budget. Be warm and encouraging, never alarming.\n\n"
+        "to breach its budget.\n\n"
         f"{summary_df.to_string(index=False)}"
     )
 
-    fallback = {
-        "tone": "warning",
-        "headline": "Summary unavailable",
-        "tip": "",
-    }
+    fallback = {"tone": "warning", "headline": "Summary unavailable", "tip": ""}
 
     max_retries = 3
     for attempt in range(max_retries):
@@ -279,57 +218,39 @@ def generate_summary(summary_df: pd.DataFrame) -> dict:
             response = client.models.generate_content(
                 model="gemini-2.5-flash-lite", contents=prompt
             )
-            raw = response.text.strip()
-            # Strip accidental markdown code fences, just in case
-            if raw.startswith("```"):
-                raw = raw.strip("`")
-                raw = raw.replace("json\n", "", 1) if raw.startswith("json\n") else raw
-
+            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", response.text.strip()).strip()
             parsed = json.loads(raw)
-
-            # Validate shape before trusting it — never let a malformed
-            # response crash the UI layer downstream
             if not all(k in parsed for k in ("tone", "headline", "tip")):
-                raise ValueError("Missing expected keys in Gemini JSON response")
+                raise ValueError("Missing expected keys in Gemini response")
             if parsed["tone"] not in ("good", "warning"):
                 parsed["tone"] = "warning"
-
             return parsed
-
         except Exception as e:
-            is_last_attempt = attempt == max_retries - 1
-            if is_last_attempt:
-                fallback["headline"] = f"Summary unavailable after {max_retries} attempts"
+            if attempt == max_retries - 1:
                 fallback["tip"] = str(e)
                 return fallback
-            time.sleep(2 ** attempt)  # 1s, then 2s backoff before retrying
+            time.sleep(2 ** attempt)
 
     return fallback
 
 
 def log_run_to_history(raw_df: pd.DataFrame, ai_summary: dict) -> None:
-    """Best-effort logging — a logging failure should never break the dashboard."""
     try:
         history_ws = load_history_sheet()
-        total_spent = float(raw_df["spent"].sum())
-        total_budget = float(raw_df["budget"].sum())
-        categories_over = int(raw_df["will_breach"].sum())
-
         history_ws.append_row([
             datetime.datetime.now().isoformat(timespec="seconds"),
-            round(total_spent, 2),
-            round(total_budget, 2),
-            categories_over,
+            round(float(raw_df["spent"].sum()), 2),
+            round(float(raw_df["budget"].sum()), 2),
+            int(raw_df["will_breach"].sum()),
             ai_summary.get("tone", ""),
             ai_summary.get("headline", ""),
             ai_summary.get("tip", ""),
         ])
     except Exception:
-        pass  # logging is non-critical; never break the main flow over it
+        pass
 
 
 def load_run_history(limit: int = 10) -> pd.DataFrame:
-    """Fetches the most recent N logged runs, newest first."""
     try:
         history_ws = load_history_sheet()
         records = history_ws.get_all_records()
@@ -352,8 +273,6 @@ def run_spendsense_check():
     if not data:
         return "No transactions found in the sheet yet.", pd.DataFrame(), {}, pd.DataFrame(), pd.DataFrame()
 
-    # Normalize column names — strips stray whitespace from Sheet headers
-    # (e.g. "sms_text " with a trailing space) so lookups don't silently fail
     data = [{k.strip(): v for k, v in row.items()} for row in data]
 
     processed = []
@@ -361,21 +280,17 @@ def run_spendsense_check():
     for row in data:
         sms_text = str(row.get("sms_text", "")).strip()
         timestamp = str(row.get("timestamp", "")).strip()
-
         if not sms_text or not timestamp:
             skipped_rows += 1
-            continue  # skip incomplete rows instead of crashing the whole app
-
+            continue
         parsed = parse_transaction(sms_text)
         category = classify_transaction(sms_text, vectorizer, clf)
-        processed.append(
-            {
-                "date": timestamp,
-                "merchant": parsed["merchant"],
-                "amount": parsed["amount"],
-                "category": category,
-            }
-        )
+        processed.append({
+            "date": timestamp,
+            "merchant": parsed["merchant"],
+            "amount": parsed["amount"],
+            "category": category,
+        })
 
     if not processed:
         return (
@@ -388,7 +303,11 @@ def run_spendsense_check():
 
     simulated_today = live_df["date"].max()
     week_start = live_df["date"].min().normalize()
-    week_end = week_start + pd.Timedelta(days=6)
+    week_end = week_start + pd.Timedelta(days=7) - pd.Timedelta(seconds=1)
+
+    # Deduplicate Telegram alerts per session
+    if "alerts_sent" not in st.session_state:
+        st.session_state.alerts_sent = set()
 
     summary_rows = []
     raw_rows = []
@@ -398,26 +317,22 @@ def run_spendsense_check():
         result = forecast_breach(live_df, cat, budget, week_start, week_end, today=simulated_today)
         status = "⚠️ Over pace" if result["will_breach"] else "✅ On track"
 
-        summary_rows.append(
-            {
-                "Category": cat.capitalize(),
-                "Spent so far": f"₹{result['current_spend']}",
-                "Projected": f"₹{result['projected_total']}",
-                "Budget": f"₹{result['budget']}",
-                "Status": status,
-            }
-        )
-        raw_rows.append(
-            {
-                "category": cat.capitalize(),
-                "spent": result["current_spend"],
-                "projected": result["projected_total"],
-                "budget": result["budget"],
-                "will_breach": result["will_breach"],
-            }
-        )
+        summary_rows.append({
+            "Category": cat.capitalize(),
+            "Spent so far": f"₹{result['current_spend']}",
+            "Projected": f"₹{result['projected_total']}",
+            "Budget": f"₹{result['budget']}",
+            "Status": status,
+        })
+        raw_rows.append({
+            "category": cat.capitalize(),
+            "spent": result["current_spend"],
+            "projected": result["projected_total"],
+            "budget": result["budget"],
+            "will_breach": result["will_breach"],
+        })
 
-        if result["will_breach"]:
+        if result["will_breach"] and cat not in st.session_state.alerts_sent:
             alert_message = (
                 f"⚠️ Budget Alert: {cat.upper()}\n"
                 f"Spent so far: ₹{result['current_spend']}\n"
@@ -425,6 +340,7 @@ def run_spendsense_check():
                 f"Budget: ₹{result['budget']}"
             )
             send_telegram_alert(alert_message)
+            st.session_state.alerts_sent.add(cat)
             alerts_fired.append(cat)
 
     summary_df = pd.DataFrame(summary_rows)
@@ -432,6 +348,8 @@ def run_spendsense_check():
 
     if alerts_fired:
         status_message = f"🔔 Alerts sent for: {', '.join(alerts_fired)}. Check your Telegram!"
+    elif any(r["will_breach"] for r in raw_rows):
+        status_message = "⚠️ Some categories are over pace (alerts already sent this session)."
     else:
         status_message = "✅ All categories on track. No alerts needed."
 
@@ -442,7 +360,7 @@ def run_spendsense_check():
 
 
 # ──────────────────────────────────────────────────────────────
-# 5. Streamlit UI — fintech dashboard
+# 5. Streamlit UI
 # ──────────────────────────────────────────────────────────────
 import plotly.graph_objects as go
 
@@ -471,7 +389,6 @@ header[data-testid="stHeader"] { background: transparent; }
 section[data-testid="stSidebar"] { background-color: var(--surface); border-right: 1px solid var(--hair); }
 .block-container { padding-top: 1.8rem; }
 
-/* sidebar brand */
 .ss-brand {
     display: flex; align-items: center; gap: 10px; padding: 4px 4px 22px 4px;
     border-bottom: 1px solid var(--hair); margin-bottom: 18px;
@@ -488,7 +405,6 @@ section[data-testid="stSidebar"] { background-color: var(--surface); border-righ
     text-transform: uppercase; margin: 4px 0 10px 4px;
 }
 
-/* stat cards */
 .ss-stat {
     background: var(--surface); border: 1px solid var(--hair); border-radius: 14px;
     padding: 18px 20px; height: 100%;
@@ -499,15 +415,12 @@ section[data-testid="stSidebar"] { background-color: var(--surface); border-righ
 }
 .ss-stat-value { font-size: 1.6rem; font-weight: 700; color: var(--ink); margin-bottom: 6px; }
 .ss-stat-sub { font-size: 0.76rem; }
-.ss-stat-sub.good { color: var(--good); }
-.ss-stat-sub.warn { color: var(--warn); }
 .ss-pill {
     font-size: 0.68rem; padding: 2px 9px; border-radius: 20px; font-weight: 600;
 }
 .ss-pill.good { background: rgba(52,211,153,0.15); color: var(--good); }
 .ss-pill.warn { background: rgba(248,113,113,0.15); color: var(--warn); }
 
-/* hero balance card */
 .ss-hero {
     background: linear-gradient(135deg, var(--accent1), var(--accent2));
     border-radius: 16px; padding: 22px 24px; color: white; height: 100%;
@@ -516,7 +429,6 @@ section[data-testid="stSidebar"] { background-color: var(--surface); border-righ
 .ss-hero-value { font-size: 2rem; font-weight: 700; margin-bottom: 4px; }
 .ss-hero-sub { font-size: 0.78rem; opacity: 0.85; }
 
-/* panel wrapper for charts */
 .ss-panel {
     background: var(--surface); border: 1px solid var(--hair);
     border-radius: 14px; padding: 18px 20px 6px 20px; margin-bottom: 18px;
@@ -524,7 +436,6 @@ section[data-testid="stSidebar"] { background-color: var(--surface); border-righ
 .ss-panel-title { font-size: 0.95rem; font-weight: 600; color: var(--ink); margin-bottom: 2px; }
 .ss-panel-sub { font-size: 0.76rem; color: var(--muted); margin-bottom: 6px; }
 
-/* transactions table */
 .ss-tx-row {
     display: flex; justify-content: space-between; align-items: center;
     padding: 11px 4px; border-bottom: 1px solid var(--hair); font-size: 0.85rem;
@@ -534,7 +445,6 @@ section[data-testid="stSidebar"] { background-color: var(--surface); border-righ
 .ss-tx-cat { color: var(--muted); font-size: 0.76rem; }
 .ss-tx-amount { font-weight: 600; color: var(--ink); }
 
-/* ai summary callout */
 .ss-summary {
     background: var(--surface2); border-left: 3px solid var(--accent1);
     border-radius: 0 12px 12px 0; padding: 16px 20px; font-size: 0.9rem;
@@ -545,7 +455,6 @@ section[data-testid="stSidebar"] { background-color: var(--surface); border-righ
     text-transform: uppercase; margin-bottom: 8px; display: block; font-weight: 600;
 }
 
-/* past digests (sidebar history) */
 .ss-hist-row {
     font-size: 0.78rem; padding: 6px 0; border-bottom: 1px solid var(--hair);
 }
@@ -629,7 +538,6 @@ if run_clicked:
         pct_used = (total_spent / total_budget * 100) if total_budget else 0
         over_count = int(raw_df["will_breach"].sum())
 
-        # ── top row: hero balance + stat cards ─────────────────
         col_hero, col1, col2 = st.columns([1.3, 1, 1])
 
         with col_hero:
@@ -673,7 +581,6 @@ if run_clicked:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # ── charts row: bar (spent vs budget) + donut (category split) ──
         col_bar, col_donut = st.columns([1.4, 1])
 
         with col_bar:
@@ -738,7 +645,6 @@ if run_clicked:
             st.plotly_chart(fig_donut, use_container_width=True, config={"displayModeBar": False})
             st.markdown("</div>", unsafe_allow_html=True)
 
-        # ── recent transactions ──────────────────────────────────
         if not live_df.empty:
             st.markdown(
                 """
@@ -756,7 +662,9 @@ if run_clicked:
                 label_visibility="collapsed",
             )
 
-            filtered_df = live_df if tx_filter == "All" else live_df[live_df["category"].str.capitalize() == tx_filter]
+            filtered_df = live_df if tx_filter == "All" else live_df[
+                live_df["category"].str.capitalize() == tx_filter
+            ]
 
             rows_html = ""
             for _, row in filtered_df.sort_values("date", ascending=False).head(15).iterrows():
@@ -769,17 +677,22 @@ if run_clicked:
                     <div class="ss-tx-amount">₹{row['amount']:,.0f}</div>
                 </div>
                 """
-            st.markdown(rows_html if rows_html else "<p style='color:var(--muted);font-size:0.85rem;'>No transactions in this category.</p>", unsafe_allow_html=True)
             st.markdown(
-                f'<p style="color:var(--muted);font-size:0.75rem;margin-top:8px;">Showing {min(len(filtered_df), 15)} of {len(filtered_df)} transactions</p>',
+                rows_html if rows_html else
+                "<p style='color:var(--muted);font-size:0.85rem;'>No transactions in this category.</p>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f'<p style="color:var(--muted);font-size:0.75rem;margin-top:8px;">'
+                f'Showing {min(len(filtered_df), 15)} of {len(filtered_df)} transactions</p>',
                 unsafe_allow_html=True,
             )
             st.markdown("</div>", unsafe_allow_html=True)
 
-        # ── status + AI summary ─────────────────────────────────
         status_color = "var(--warn)" if "🔔" in status_message else "var(--good)"
         st.markdown(
-            f'<div style="color:{status_color};font-size:0.85rem;font-weight:600;margin-bottom:10px;">{status_message}</div>',
+            f'<div style="color:{status_color};font-size:0.85rem;font-weight:600;margin-bottom:10px;">'
+            f'{status_message}</div>',
             unsafe_allow_html=True,
         )
 
@@ -787,7 +700,6 @@ if run_clicked:
             tone = ai_summary_data.get("tone", "warning")
             border_color = "var(--good)" if tone == "good" else "var(--warn)"
             tone_icon = "✅" if tone == "good" else "⚠️"
-
             st.markdown(
                 f"""
                 <div class="ss-summary" style="border-left-color: {border_color};">
