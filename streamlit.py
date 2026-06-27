@@ -99,8 +99,7 @@ BUDGETS = {
     "food": 15000,
     "shopping": 3000,
     "travel": 1000,
-    "daily": 800,
-    "uncategorized": 500,  # placeholder budget; mainly for visibility, not enforcement
+    "daily": 800
 }
 
 
