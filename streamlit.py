@@ -512,6 +512,272 @@ with st.sidebar:
     st.markdown("<br>", unsafe_allow_html=True)
     st.caption("Built for the DDS AI Application Building Challenge")
 
+EXPLAINER_CSS = """
+<style>
+/* ── Hero ── */
+.ss-hero-block {
+    background: linear-gradient(135deg, #0f1623 0%, #1a1040 50%, #0f1623 100%);
+    border: 1px solid var(--hair); border-radius: 20px;
+    padding: 52px 48px 48px; margin-bottom: 32px; position: relative; overflow: hidden;
+}
+.ss-hero-block::before {
+    content: ""; position: absolute; top: -60px; right: -60px;
+    width: 320px; height: 320px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(79,124,255,0.12) 0%, transparent 70%);
+    pointer-events: none;
+}
+.ss-hero-block::after {
+    content: ""; position: absolute; bottom: -80px; left: 20%;
+    width: 260px; height: 260px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(168,85,247,0.1) 0%, transparent 70%);
+    pointer-events: none;
+}
+.ss-hero-eyebrow {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: rgba(79,124,255,0.12); border: 1px solid rgba(79,124,255,0.25);
+    border-radius: 20px; padding: 4px 14px; font-size: 0.72rem; font-weight: 600;
+    color: var(--accent1); letter-spacing: 0.06em; text-transform: uppercase;
+    margin-bottom: 20px;
+}
+.ss-hero-headline {
+    font-size: 2.4rem; font-weight: 700; color: var(--ink);
+    line-height: 1.2; margin-bottom: 16px;
+}
+.ss-hero-headline span {
+    background: linear-gradient(90deg, var(--accent1), var(--accent2));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+}
+.ss-hero-sub {
+    font-size: 1rem; color: var(--muted); line-height: 1.7;
+    max-width: 580px; margin-bottom: 32px;
+}
+.ss-hero-stats {
+    display: flex; gap: 32px; flex-wrap: wrap;
+}
+.ss-hero-stat-item { display: flex; flex-direction: column; gap: 2px; }
+.ss-hero-stat-num { font-size: 1.5rem; font-weight: 700; color: var(--ink); }
+.ss-hero-stat-label { font-size: 0.75rem; color: var(--muted); }
+
+/* ── Section titles ── */
+.ss-section-title {
+    font-size: 1.35rem; font-weight: 700; color: var(--ink);
+    margin-bottom: 6px;
+}
+.ss-section-sub {
+    font-size: 0.875rem; color: var(--muted); margin-bottom: 24px; line-height: 1.6;
+}
+
+/* ── How it works steps ── */
+.ss-steps { display: flex; flex-direction: column; gap: 16px; margin-bottom: 36px; }
+.ss-step {
+    display: flex; gap: 18px; align-items: flex-start;
+    background: var(--surface); border: 1px solid var(--hair);
+    border-radius: 14px; padding: 20px 22px;
+    transition: border-color 0.2s;
+}
+.ss-step:hover { border-color: rgba(79,124,255,0.35); }
+.ss-step-num {
+    width: 36px; height: 36px; border-radius: 10px; flex-shrink: 0;
+    background: linear-gradient(135deg, var(--accent1), var(--accent2));
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.85rem; font-weight: 700; color: white;
+}
+.ss-step-title { font-size: 0.95rem; font-weight: 600; color: var(--ink); margin-bottom: 4px; }
+.ss-step-desc { font-size: 0.82rem; color: var(--muted); line-height: 1.6; }
+
+/* ── Why it matters cards ── */
+.ss-why-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 36px; }
+.ss-why-card {
+    background: var(--surface); border: 1px solid var(--hair);
+    border-radius: 14px; padding: 20px 20px 18px;
+}
+.ss-why-icon {
+    font-size: 1.4rem; margin-bottom: 10px; display: block;
+}
+.ss-why-title { font-size: 0.9rem; font-weight: 600; color: var(--ink); margin-bottom: 6px; }
+.ss-why-desc { font-size: 0.8rem; color: var(--muted); line-height: 1.6; }
+
+/* ── Category pills ── */
+.ss-cat-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 36px; }
+.ss-cat-pill {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--surface); border: 1px solid var(--hair);
+    border-radius: 12px; padding: 10px 16px;
+}
+.ss-cat-pill-icon { font-size: 1.1rem; }
+.ss-cat-pill-name { font-size: 0.82rem; font-weight: 600; color: var(--ink); }
+.ss-cat-pill-budget { font-size: 0.72rem; color: var(--muted); }
+
+/* ── Divider ── */
+.ss-divider {
+    border: none; border-top: 1px solid var(--hair); margin: 8px 0 28px;
+}
+</style>
+"""
+
+st.markdown(EXPLAINER_CSS, unsafe_allow_html=True)
+
+st.markdown("""
+<div class="ss-hero-block">
+    <div class="ss-hero-eyebrow">💸 AI-Powered · Real-Time · Predictive</div>
+    <div class="ss-hero-headline">Stop finding out you're<br><span>over budget after the damage.</span></div>
+    <div class="ss-hero-sub">
+        SpendSense watches every transaction from your bank SMS feed, auto-categorizes it with ML,
+        forecasts whether you'll breach your weekly budget — and fires a Telegram alert
+        the moment a category looks risky. All before the week is over.
+    </div>
+    <div class="ss-hero-stats">
+        <div class="ss-hero-stat-item">
+            <span class="ss-hero-stat-num">4</span>
+            <span class="ss-hero-stat-label">Spend categories tracked</span>
+        </div>
+        <div class="ss-hero-stat-item">
+            <span class="ss-hero-stat-num">7-day</span>
+            <span class="ss-hero-stat-label">Rolling budget window</span>
+        </div>
+        <div class="ss-hero-stat-item">
+            <span class="ss-hero-stat-num">Real-time</span>
+            <span class="ss-hero-stat-label">Telegram breach alerts</span>
+        </div>
+        <div class="ss-hero-stat-item">
+            <span class="ss-hero-stat-num">Gemini</span>
+            <span class="ss-hero-stat-label">AI weekly summary</span>
+        </div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+# ── How it works ────────────────────────────────────────────
+st.markdown('<div class="ss-section-title">How it works</div>', unsafe_allow_html=True)
+st.markdown('<div class="ss-section-sub">Four steps from raw SMS to smart budget insight.</div>', unsafe_allow_html=True)
+
+st.markdown("""
+<div class="ss-steps">
+    <div class="ss-step">
+        <div class="ss-step-num">1</div>
+        <div>
+            <div class="ss-step-title">Bank SMS lands in Google Sheets</div>
+            <div class="ss-step-desc">
+                Your bank sends an SMS for every transaction — UPI payment, debit, cab ride, food order.
+                These get logged into a Google Sheet that acts as a live feed. SpendSense reads directly from it.
+            </div>
+        </div>
+    </div>
+    <div class="ss-step">
+        <div class="ss-step-num">2</div>
+        <div>
+            <div class="ss-step-title">ML classifier assigns a category</div>
+            <div class="ss-step-desc">
+                A TF-IDF + Logistic Regression model trained on 40 real transaction patterns reads each SMS
+                and assigns it to one of 4 categories — Food, Shopping, Travel, or Daily — instantly, with no manual tagging.
+            </div>
+        </div>
+    </div>
+    <div class="ss-step">
+        <div class="ss-step-num">3</div>
+        <div>
+            <div class="ss-step-title">Budget breach is forecast, not just measured</div>
+            <div class="ss-step-desc">
+                Instead of showing you what you've spent, SpendSense projects your full-week total from your
+                current daily burn rate. If food spending is on pace to hit ₹18,000 against a ₹15,000 budget,
+                you get warned on day 3 — not day 7.
+            </div>
+        </div>
+    </div>
+    <div class="ss-step">
+        <div class="ss-step-num">4</div>
+        <div>
+            <div class="ss-step-title">Telegram alert + AI summary fires instantly</div>
+            <div class="ss-step-desc">
+                The moment a category crosses the breach threshold, a Telegram message goes out.
+                Gemini Flash-Lite also generates a structured read — tone, headline, and one actionable tip —
+                so you know exactly what to do next.
+            </div>
+        </div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+# ── Why it matters ──────────────────────────────────────────
+st.markdown('<div class="ss-section-title">Why it matters</div>', unsafe_allow_html=True)
+st.markdown('<div class="ss-section-sub">Most budgeting apps tell you what happened. SpendSense tells you what\'s about to happen.</div>', unsafe_allow_html=True)
+
+st.markdown("""
+<div class="ss-why-grid">
+    <div class="ss-why-card">
+        <span class="ss-why-icon">🔮</span>
+        <div class="ss-why-title">Predictive, not reactive</div>
+        <div class="ss-why-desc">
+            Forecasting from daily burn rate means you see a budget overrun 3–5 days before it happens —
+            early enough to actually change your behaviour.
+        </div>
+    </div>
+    <div class="ss-why-card">
+        <span class="ss-why-icon">🤖</span>
+        <div class="ss-why-title">Zero manual input</div>
+        <div class="ss-why-desc">
+            No tagging, no receipt scanning, no manual categorization. The ML model reads your raw bank
+            SMS text and classifies it automatically every time.
+        </div>
+    </div>
+    <div class="ss-why-card">
+        <span class="ss-why-icon">⚡</span>
+        <div class="ss-why-title">Alerts before you check</div>
+        <div class="ss-why-desc">
+            Telegram notifications mean you don't have to remember to open the app. The app comes to you
+            the moment something looks risky.
+        </div>
+    </div>
+    <div class="ss-why-card">
+        <span class="ss-why-icon">📝</span>
+        <div class="ss-why-title">AI that explains, not just reports</div>
+        <div class="ss-why-desc">
+            Gemini doesn't dump a table on you — it gives a one-line read on your week and one
+            practical tip tied to the riskiest category. Structured, scannable, actionable.
+        </div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+# ── Categories ──────────────────────────────────────────────
+st.markdown('<div class="ss-section-title">What gets tracked</div>', unsafe_allow_html=True)
+st.markdown('<div class="ss-section-sub">Every transaction is classified into one of these 4 categories, each with its own weekly budget.</div>', unsafe_allow_html=True)
+
+st.markdown("""
+<div class="ss-cat-row">
+    <div class="ss-cat-pill">
+        <span class="ss-cat-pill-icon">🍔</span>
+        <div>
+            <div class="ss-cat-pill-name">Food</div>
+            <div class="ss-cat-pill-budget">Budget ₹15,000 / week</div>
+        </div>
+    </div>
+    <div class="ss-cat-pill">
+        <span class="ss-cat-pill-icon">🛍️</span>
+        <div>
+            <div class="ss-cat-pill-name">Shopping</div>
+            <div class="ss-cat-pill-budget">Budget ₹3,000 / week</div>
+        </div>
+    </div>
+    <div class="ss-cat-pill">
+        <span class="ss-cat-pill-icon">✈️</span>
+        <div>
+            <div class="ss-cat-pill-name">Travel</div>
+            <div class="ss-cat-pill-budget">Budget ₹1,000 / week</div>
+        </div>
+    </div>
+    <div class="ss-cat-pill">
+        <span class="ss-cat-pill-icon">🧺</span>
+        <div>
+            <div class="ss-cat-pill-name">Daily</div>
+            <div class="ss-cat-pill-budget">Budget ₹800 / week</div>
+        </div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+st.markdown('<hr class="ss-divider">', unsafe_allow_html=True)
+
 st.markdown("## Dashboard")
 st.caption("Live view of your spending, categorized and forecasted by AI.")
 
