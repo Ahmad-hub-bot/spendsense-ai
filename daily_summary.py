@@ -21,13 +21,14 @@ import datetime
 import requests
 import pandas as pd
 import gspread
+from functools import lru_cache
 from google.oauth2.service_account import Credentials
 from google import genai
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 
 # ──────────────────────────────────────────────────────────────
-# Config — same training data and budgets as app.py (keep these in sync!)
+# Config — keep in sync with streamlit.py
 # ──────────────────────────────────────────────────────────────
 SAMPLE_TRANSACTIONS = [
     "INR 450.00 debited from your account for SWIGGY on 12-06-2026",
@@ -71,17 +72,18 @@ SAMPLE_TRANSACTIONS = [
     "INR 80 debited for WATER CAN delivery",
     "Rs 100 paid at GENERAL STORE",
 ]
-LABELS = (["food"] * 10 + ["shopping"] * 10 + ["travel"] * 10 + ["daily"] * 10)
+
+LABELS = ["food"] * 10 + ["shopping"] * 10 + ["travel"] * 10 + ["daily"] * 10
 
 BUDGETS = {
     "food": 15000,
     "shopping": 3000,
     "travel": 1000,
     "daily": 800,
-    "miscellaneous": 500,  # catch-all for low-confidence classifications
 }
 
 
+@lru_cache(maxsize=1)
 def load_classifier():
     vectorizer = TfidfVectorizer(
         stop_words=[
@@ -109,8 +111,6 @@ def load_sheet_client():
 
 
 def load_history_sheet(spreadsheet):
-    """Opens (or creates) a 'History' worksheet tab in the same Google Sheet
-    used for live transactions, to store a row per check run."""
     try:
         return spreadsheet.worksheet("History")
     except gspread.WorksheetNotFound:
@@ -123,13 +123,11 @@ def load_history_sheet(spreadsheet):
 
 
 def log_run_to_history(spreadsheet, raw_rows: list, ai_summary: dict) -> None:
-    """Best-effort logging — a logging failure should never break the digest send."""
     try:
         history_ws = load_history_sheet(spreadsheet)
         total_spent = sum(r["current_spend"] for r in raw_rows)
         total_budget = sum(r["budget"] for r in raw_rows)
         categories_over = sum(1 for r in raw_rows if r["will_breach"])
-
         history_ws.append_row([
             datetime.datetime.now().isoformat(timespec="seconds"),
             round(total_spent, 2),
@@ -140,7 +138,7 @@ def log_run_to_history(spreadsheet, raw_rows: list, ai_summary: dict) -> None:
             ai_summary.get("tip", ""),
         ])
     except Exception:
-        pass  # logging is non-critical; never break the main flow over it
+        pass
 
 
 def parse_transaction(sms_text: str) -> dict:
@@ -151,6 +149,8 @@ def parse_transaction(sms_text: str) -> dict:
     ignore_words = {
         "INR", "RS", "UPI", "CARD", "YOUR", "ACCOUNT", "FROM", "FOR",
         "YOU", "USING", "SPENT", "DEBITED", "PAID", "ENDING", "TO",
+        "HDFC", "ICICI", "SBI", "AXIS", "KOTAK", "YES", "BANK",
+        "ALERT", "DEAR", "CUSTOMER", "TRANSACTION",
     }
     merchants = [m for m in merchant_match if m.upper() not in ignore_words]
 
@@ -165,22 +165,10 @@ def parse_transaction(sms_text: str) -> dict:
     return {"amount": amount, "merchant": merchant, "raw_text": sms_text}
 
 
-def classify_transaction(sms_text: str, vectorizer, clf, threshold: float = 0.4) -> str:
-    """Classifies with a confidence floor — anything below threshold is
-    labeled 'miscellaneous' rather than silently guessing wrong.
-    NOTE: with a small training set, even in-sample transactions can score
-    under 40% confidence (verified during testing), so this may catch more
-    transactions than intended. Consider lowering `threshold` (e.g. 0.25)
-    or expanding SAMPLE_TRANSACTIONS if 'miscellaneous' fills up too fast.
-    Keep this in sync with app.py."""
+def classify_transaction(sms_text: str, vectorizer, clf) -> str:
+    """Always classifies into one of the 4 trained categories: food, shopping, travel, daily."""
     X_new = vectorizer.transform([sms_text])
-    probs = clf.predict_proba(X_new)[0]
-    best_idx = probs.argmax()
-    confidence = probs[best_idx]
-
-    if confidence < threshold:
-        return "miscellaneous"
-    return clf.classes_[best_idx]
+    return clf.classes_[clf.predict(X_new)[0]]
 
 
 def forecast_breach(df, category, weekly_budget, week_start, week_end, today=None):
@@ -216,13 +204,6 @@ def send_telegram_message(message: str) -> dict:
 
 
 def generate_ai_summary(summary_lines: str) -> dict:
-    """Uses Gemini Flash-Lite to generate a structured spending summary.
-    Returns a dict: {"tone": "good"|"warning", "headline": str, "tip": str}
-    instead of a free-text blob, so both the Telegram message and the
-    History log can use consistent, parseable fields.
-    Retries on transient server-side errors before giving up; falls back
-    silently (empty headline) if Gemini is unavailable, matching the
-    original best-effort behavior."""
     fallback = {"tone": "warning", "headline": "", "tip": ""}
 
     try:
@@ -238,8 +219,7 @@ def generate_ai_summary(summary_lines: str) -> dict:
         'the overall state", "tip": "one practical, encouraging tip tied '
         'to the riskiest category"}\n\n'
         "Set tone to \"warning\" only if at least one category is over pace "
-        "or projected to breach its budget. Be warm and encouraging, never "
-        "alarming, even if a category is over pace.\n\n"
+        "or projected to breach its budget.\n\n"
         f"{summary_lines}"
     )
 
@@ -249,23 +229,17 @@ def generate_ai_summary(summary_lines: str) -> dict:
             response = client.models.generate_content(
                 model="gemini-2.5-flash-lite", contents=prompt
             )
-            raw = response.text.strip()
-            if raw.startswith("```"):
-                raw = raw.strip("`")
-                raw = raw.replace("json\n", "", 1) if raw.startswith("json\n") else raw
-
+            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", response.text.strip()).strip()
             parsed = json.loads(raw)
             if not all(k in parsed for k in ("tone", "headline", "tip")):
-                raise ValueError("Missing expected keys in Gemini JSON response")
+                raise ValueError("Missing expected keys in Gemini response")
             if parsed["tone"] not in ("good", "warning"):
                 parsed["tone"] = "warning"
             return parsed
-
         except Exception:
-            is_last_attempt = attempt == max_retries - 1
-            if is_last_attempt:
-                return fallback  # silent fallback, same spirit as the original
-            time.sleep(2 ** attempt)  # 1s, then 2s backoff before retrying
+            if attempt == max_retries - 1:
+                return fallback
+            time.sleep(2 ** attempt)
 
     return fallback
 
@@ -302,7 +276,7 @@ def main():
 
     simulated_today = live_df["date"].max()
     week_start = live_df["date"].min().normalize()
-    week_end = week_start + pd.Timedelta(days=6)
+    week_end = week_start + pd.Timedelta(days=7) - pd.Timedelta(seconds=1)
 
     lines = ["🌙 SpendSense Evening Digest", ""]
     summary_for_ai = []
