@@ -78,7 +78,6 @@ BUDGETS = {
     "shopping": 3000,
     "travel": 1000,
     "daily": 800,
-    "uncategorized": 500,  # placeholder budget; mainly for visibility, not enforcement
 }
 
 
@@ -165,18 +164,15 @@ def parse_transaction(sms_text: str) -> dict:
     return {"amount": amount, "merchant": merchant, "raw_text": sms_text}
 
 
-def classify_transaction(sms_text: str, vectorizer, clf, threshold: float = 0.4) -> str:
-    """Classifies with a confidence floor — anything below threshold is
-    labeled 'uncategorized' rather than silently guessing wrong.
-    Keep this in sync with the matching function in app.py."""
+def classify_transaction(sms_text: str, vectorizer, clf) -> str:
+    """Picks the model's best guess among the known categories.
+    (Reverted the confidence-threshold/'uncategorized' approach — with this
+    small a training set, even in-sample transactions score well under any
+    reasonable threshold, so it flagged known-good data as unsure rather
+    than catching genuinely novel transactions. Worth revisiting once the
+    training set is much larger. Keep this in sync with app.py.)"""
     X_new = vectorizer.transform([sms_text])
-    probs = clf.predict_proba(X_new)[0]
-    best_idx = probs.argmax()
-    confidence = probs[best_idx]
-
-    if confidence < threshold:
-        return "uncategorized"
-    return clf.classes_[best_idx]
+    return clf.predict(X_new)[0]
 
 
 def forecast_breach(df, category, weekly_budget, week_start, week_end, today=None):
