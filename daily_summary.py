@@ -16,6 +16,8 @@ Required environment variables / secrets (set in GitHub repo Settings -> Secrets
 import os
 import re
 import json
+import time
+import datetime
 import requests
 import pandas as pd
 import gspread
@@ -76,6 +78,7 @@ BUDGETS = {
     "shopping": 3000,
     "travel": 1000,
     "daily": 800,
+    "uncategorized": 500,  # placeholder budget; mainly for visibility, not enforcement
 }
 
 
@@ -102,7 +105,42 @@ def load_sheet_client():
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     client = gspread.authorize(creds)
     sheet_name = os.environ.get("GSHEET_NAME", "SpendSense Live Feed")
-    return client.open(sheet_name).sheet1
+    return client.open(sheet_name)
+
+
+def load_history_sheet(spreadsheet):
+    """Opens (or creates) a 'History' worksheet tab in the same Google Sheet
+    used for live transactions, to store a row per check run."""
+    try:
+        return spreadsheet.worksheet("History")
+    except gspread.WorksheetNotFound:
+        history_ws = spreadsheet.add_worksheet(title="History", rows=1000, cols=8)
+        history_ws.append_row(
+            ["timestamp", "total_spent", "total_budget", "categories_over",
+             "tone", "headline", "tip"]
+        )
+        return history_ws
+
+
+def log_run_to_history(spreadsheet, raw_rows: list, ai_summary: dict) -> None:
+    """Best-effort logging — a logging failure should never break the digest send."""
+    try:
+        history_ws = load_history_sheet(spreadsheet)
+        total_spent = sum(r["current_spend"] for r in raw_rows)
+        total_budget = sum(r["budget"] for r in raw_rows)
+        categories_over = sum(1 for r in raw_rows if r["will_breach"])
+
+        history_ws.append_row([
+            datetime.datetime.now().isoformat(timespec="seconds"),
+            round(total_spent, 2),
+            round(total_budget, 2),
+            categories_over,
+            ai_summary.get("tone", ""),
+            ai_summary.get("headline", ""),
+            ai_summary.get("tip", ""),
+        ])
+    except Exception:
+        pass  # logging is non-critical; never break the main flow over it
 
 
 def parse_transaction(sms_text: str) -> dict:
@@ -127,9 +165,18 @@ def parse_transaction(sms_text: str) -> dict:
     return {"amount": amount, "merchant": merchant, "raw_text": sms_text}
 
 
-def classify_transaction(sms_text, vectorizer, clf):
+def classify_transaction(sms_text: str, vectorizer, clf, threshold: float = 0.4) -> str:
+    """Classifies with a confidence floor — anything below threshold is
+    labeled 'uncategorized' rather than silently guessing wrong.
+    Keep this in sync with the matching function in app.py."""
     X_new = vectorizer.transform([sms_text])
-    return clf.predict(X_new)[0]
+    probs = clf.predict_proba(X_new)[0]
+    best_idx = probs.argmax()
+    confidence = probs[best_idx]
+
+    if confidence < threshold:
+        return "uncategorized"
+    return clf.classes_[best_idx]
 
 
 def forecast_breach(df, category, weekly_budget, week_start, week_end, today=None):
@@ -164,25 +211,65 @@ def send_telegram_message(message: str) -> dict:
     return response.json()
 
 
-def generate_ai_summary(summary_lines: str) -> str:
-    """Best-effort AI summary — falls back silently if Gemini is unavailable."""
+def generate_ai_summary(summary_lines: str) -> dict:
+    """Uses Gemini Flash-Lite to generate a structured spending summary.
+    Returns a dict: {"tone": "good"|"warning", "headline": str, "tip": str}
+    instead of a free-text blob, so both the Telegram message and the
+    History log can use consistent, parseable fields.
+    Retries on transient server-side errors before giving up; falls back
+    silently (empty headline) if Gemini is unavailable, matching the
+    original best-effort behavior."""
+    fallback = {"tone": "warning", "headline": "", "tip": ""}
+
     try:
         client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-        prompt = (
-            "You are a friendly financial assistant. Based on this end-of-day "
-            "spending snapshot, write a 2-3 sentence evening summary. Be warm "
-            "and encouraging, not alarming, even if a category is over pace.\n\n"
-            f"{summary_lines}"
-        )
-        response = client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt)
-        return response.text
     except Exception:
-        return ""
+        return fallback
+
+    prompt = (
+        "You are a friendly financial assistant. Based on this end-of-day "
+        "spending snapshot, respond with ONLY a JSON object (no markdown, "
+        "no code fences) in exactly this shape:\n"
+        '{"tone": "good" or "warning", "headline": "one short sentence on '
+        'the overall state", "tip": "one practical, encouraging tip tied '
+        'to the riskiest category"}\n\n'
+        "Set tone to \"warning\" only if at least one category is over pace "
+        "or projected to breach its budget. Be warm and encouraging, never "
+        "alarming, even if a category is over pace.\n\n"
+        f"{summary_lines}"
+    )
+
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.5-flash-lite", contents=prompt
+            )
+            raw = response.text.strip()
+            if raw.startswith("```"):
+                raw = raw.strip("`")
+                raw = raw.replace("json\n", "", 1) if raw.startswith("json\n") else raw
+
+            parsed = json.loads(raw)
+            if not all(k in parsed for k in ("tone", "headline", "tip")):
+                raise ValueError("Missing expected keys in Gemini JSON response")
+            if parsed["tone"] not in ("good", "warning"):
+                parsed["tone"] = "warning"
+            return parsed
+
+        except Exception:
+            is_last_attempt = attempt == max_retries - 1
+            if is_last_attempt:
+                return fallback  # silent fallback, same spirit as the original
+            time.sleep(2 ** attempt)  # 1s, then 2s backoff before retrying
+
+    return fallback
 
 
 def main():
     vectorizer, clf = load_classifier()
-    sheet = load_sheet_client()
+    spreadsheet = load_sheet_client()
+    sheet = spreadsheet.sheet1
 
     data = sheet.get_all_records()
     data = [{k.strip(): v for k, v in row.items()} for row in data]
@@ -215,6 +302,7 @@ def main():
 
     lines = ["🌙 SpendSense Evening Digest", ""]
     summary_for_ai = []
+    raw_rows = []
 
     for cat, budget in BUDGETS.items():
         result = forecast_breach(live_df, cat, budget, week_start, week_end, today=simulated_today)
@@ -227,13 +315,18 @@ def main():
             f"{cat}: spent {result['current_spend']}, projected {result['projected_total']}, "
             f"budget {result['budget']}, breach={result['will_breach']}"
         )
+        raw_rows.append(result)
 
-    ai_note = generate_ai_summary("\n".join(summary_for_ai))
-    if ai_note:
+    ai_summary = generate_ai_summary("\n".join(summary_for_ai))
+    if ai_summary.get("headline"):
+        tone_icon = "✅" if ai_summary.get("tone") == "good" else "⚠️"
         lines.append("")
-        lines.append(f"📝 {ai_note}")
+        lines.append(f"📝 {tone_icon} {ai_summary['headline']}")
+        if ai_summary.get("tip"):
+            lines.append(f"💡 {ai_summary['tip']}")
 
     send_telegram_message("\n".join(lines))
+    log_run_to_history(spreadsheet, raw_rows, ai_summary)
 
 
 if __name__ == "__main__":
