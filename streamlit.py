@@ -620,7 +620,7 @@ st.markdown(EXPLAINER_CSS, unsafe_allow_html=True)
 st.markdown("""
 <div class="ss-hero-block">
     <div class="ss-hero-eyebrow">💸 AI-Powered · Real-Time · Predictive</div>
-    <div class="ss-hero-headline">Stop finding out you're<br><span>over budget after the damage.</span></div>
+    <div class="ss-hero-headline">Your bank tells you what happened <br><span>SpendSense tells you what's coming.</span></div>
     <div class="ss-hero-sub">
         SpendSense watches every transaction from your bank SMS feed, auto-categorizes it with ML,
         forecasts whether you'll breach your weekly budget — and fires a Telegram alert
